@@ -1,75 +1,95 @@
 package server
 
 import (
-	"fmt"
-	"github.com/labstack/echo"
-	"io/ioutil"
+	"crypto/tls"
+	"io"
+	"net"
 	"net/http"
+	"time"
 )
 
-type Server struct {
-	port string
-	e    *echo.Echo
-}
+//func NewRouter() http.Handler {
+//	r := mux.NewRouter()
+//	r.HandleFunc("/last", Resp)
+//	//r.HandleFunc("/+", handleHTTP).Methods("GET", "POST")
+//	return r
+//}
 
-func NewServer(port string, e *echo.Echo) *Server {
-	e.GET("/$", Resp)
-	e.Any("*", Transfer)
-	e.CONNECT("/", TransferSSL)
+func NewServer(port string) *http.Server {
 
-	return &Server{
-		port: port,
-		e:    e,
+	return &http.Server{
+		Addr:         port,
+		TLSNextProto: make(map[string]func(*http.Server, *tls.Conn, http.Handler)),
+		//Handler:      NewRouter(),
+		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Method == http.MethodConnect {
+				handleTunneling(w, r)
+			} else {
+				//rout := NewRouter()
+				//http.Handle("/", rout)
+				if r.URL.String() == "/last" {
+					Resp(w, r)
+				} else {
+					handleHTTP(w, r)
+				}
+			}
+		}),
 	}
 }
 
-func Resp(ctx echo.Context) error {
-	fmt.Println(ctx.Request().URL)
-	return ctx.String(http.StatusOK, "Hello, World!!!")
+func Resp(w http.ResponseWriter, r *http.Request) {
+	w.Write([]byte("Hello world!?!!!!"))
+	return
 }
 
-func Transfer(ctx echo.Context) error {
+func handleHTTP(w http.ResponseWriter, r *http.Request) {
 	var resp *http.Response
 	var err error
-	switch ctx.Request().Method {
+
+	switch r.Method {
 	case "GET":
-		resp, err = http.Get(ctx.Request().URL.String())
+		resp, err = http.Get(r.URL.String())
 	case "POST":
-		resp, err = http.Post(ctx.Request().URL.String(), ctx.Request().Header.Get("Content-Type"), ctx.Request().Body)
+		resp, err = http.Post(r.URL.String(), r.Header.Get("Content-Type"), r.Body)
 	default:
-		resp, err = http.Get(ctx.Request().URL.String())
+		resp, err = http.Get(r.URL.String())
 	}
+
 	if err != nil {
-		return err
+		return
 	}
 	defer resp.Body.Close()
-	body, err := ioutil.ReadAll(resp.Body)
-	if err != nil {
-		return err
-	}
 	for mime, val := range resp.Header {
-		ctx.Response().Header().Set(mime, val[0])
+		w.Header().Set(mime, val[0])
 	}
-	ctx.Response().Header().Set("Content-Type", string(resp.Header.Get("Content-Type"))+"; charset=utf8")
-	return ctx.String(resp.StatusCode, string(body))
-
+	w.Header().Set("Content-Type", resp.Header.Get("Content-Type")+"; charset=utf8")
+	w.WriteHeader(resp.StatusCode)
+	io.Copy(w, resp.Body)
+	return
 }
 
-func TransferSSL(ctx echo.Context) error {
-	//resp, err := http.Get(ctx.QueryString())
-	//if err != nil {
-	//	return err
-	//}
-	//defer resp.Body.Close()
-	//body, err := ioutil.ReadAll(resp.Body)
-	//if err != nil {
-	//	return err
-	//}
-	//return ctx.String(http.StatusOK, string(body))
-	return ctx.String(http.StatusOK, "Transfer")
-
+func handleTunneling(w http.ResponseWriter, r *http.Request) {
+	dest_conn, err := net.DialTimeout("tcp", r.Host, 10*time.Second)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusServiceUnavailable)
+		return
+	}
+	w.WriteHeader(http.StatusOK)
+	hijacker, ok := w.(http.Hijacker)
+	if !ok {
+		http.Error(w, "Hijacking not supported", http.StatusInternalServerError)
+		return
+	}
+	client_conn, _, err := hijacker.Hijack()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusServiceUnavailable)
+	}
+	go transfer(dest_conn, client_conn)
+	go transfer(client_conn, dest_conn)
 }
 
-func (s Server) ListenAndServe() error {
-	return s.e.Start(s.port)
+func transfer(destination io.WriteCloser, source io.ReadCloser) {
+	defer destination.Close()
+	defer source.Close()
+	io.Copy(destination, source)
 }
