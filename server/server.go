@@ -48,7 +48,7 @@ func handleHTTP(w http.ResponseWriter, r *http.Request) {
 
 	switch r.Method {
 	case "GET":
-		resp, err = http.Get(r.URL.String())
+		resp, err = http.DefaultTransport.RoundTrip(r)
 	case "POST":
 		resp, err = http.Post(r.URL.String(), r.Header.Get("Content-Type"), r.Body)
 	default:
@@ -60,6 +60,9 @@ func handleHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	defer resp.Body.Close()
 	for mime, val := range resp.Header {
+		if mime == "Proxy-Connection" {
+			continue
+		}
 		w.Header().Set(mime, val[0])
 	}
 	w.Header().Set("Content-Type", resp.Header.Get("Content-Type")+"; charset=utf8")
