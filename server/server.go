@@ -12,15 +12,9 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
+	"strings"
 	"time"
 )
-
-//func NewRouter() http.Handler {
-//	r := mux.NewRouter()
-//	r.HandleFunc("/last", Resp)
-//	//r.HandleFunc("/+", handleHTTP).Methods("GET", "POST")
-//	return r
-//}
 
 type Server struct {
 	Serv http.Server
@@ -31,8 +25,9 @@ type buffer struct {
 	bytes.Buffer
 }
 
-func (b buffer) Close() error {
-	return b.Close()
+func (b *buffer) Close() error {
+	b.Buffer.Reset()
+	return nil
 }
 
 //var okHeader = []byte("HTTP/1.1 200 OK\r\n\r\n")
@@ -42,13 +37,10 @@ func NewServer(port string, db *pgxpool.Pool) Server {
 	return Server{http.Server{
 		Addr:         port,
 		TLSNextProto: make(map[string]func(*http.Server, *tls.Conn, http.Handler)),
-		//Handler:      NewRouter(),
 		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if r.Method == http.MethodConnect {
 				handleTunneling(w, r)
 			} else {
-				//rout := NewRouter()
-				//http.Handle("/", rout)
 				pattern := `^/[0-9]+`
 				if match, _ := regexp.Match(pattern, []byte(r.URL.String())); match {
 					Resp(w, r, db)
@@ -61,47 +53,57 @@ func NewServer(port string, db *pgxpool.Pool) Server {
 }
 
 func Resp(w http.ResponseWriter, r *http.Request, db *pgxpool.Pool) {
-	//w.Write([]byte("Hello world!?!!!!"))
-	//fmt.Println(r.Header)
 	ind := r.URL.String()[1:]
 	id := 0
-	fmt.Println("ind:", ind)
 	req := http.Request{}
 	URL := ""
 	headers := ""
 	body := ""
 	var rwc io.ReadWriteCloser
 	rwc = &buffer{}
-	_, err := rwc.Write([]byte("hello"))
+	//rwc.Close()
 
 	sql := `select * from requests where id = $1`
 	queryResult := db.QueryRow(context.Background(), sql, ind)
-	err = queryResult.Scan(&id, &req.Method, &URL, &headers, &body)
+	err := queryResult.Scan(&id, &req.Method, &URL, &headers, &body)
 	if err != nil {
 		fmt.Println(err)
 		return
 	}
-	req.URL, _ = url.Parse(URL)
-
 	_, err = rwc.Write([]byte(body))
 	if err != nil {
 		fmt.Println(err)
 		return
 	}
-
+	hed := make(map[string][]string)
+	for _, val := range strings.Split(headers, "\n") {
+		if val != "" {
+			buf := strings.Split(val, ":")
+			hed[buf[0]] = []string{buf[1]}
+		}
+	}
+	req.URL, _ = url.Parse(URL)
+	req.Header = hed
+	_, err = rwc.Write([]byte(body))
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
 	req.Body = rwc
-	handleHTTP(w, &req, db)
+	http.Redirect(w, &req, req.URL.String(), 301)
 	return
 }
 
 func handleHTTP(w http.ResponseWriter, r *http.Request, db *pgxpool.Pool) {
 	var resp *http.Response
 	var err error
-
 	err = LogRequest(r, db)
 	if err != nil {
 		return
 	}
+	fmt.Println("URL:", r.URL)
+	fmt.Println("HOST:", r.Host)
+	fmt.Println("URL HOST:", r.URL.Host)
 	switch r.Method {
 	case "GET":
 		resp, err = http.DefaultTransport.RoundTrip(r)
@@ -110,8 +112,8 @@ func handleHTTP(w http.ResponseWriter, r *http.Request, db *pgxpool.Pool) {
 	default:
 		resp, err = http.Get(r.URL.String())
 	}
-
 	if err != nil {
+		fmt.Println("after handle", err)
 		return
 	}
 	defer resp.Body.Close()
@@ -226,14 +228,17 @@ func newClientConfig(rootCAPath string) (*tls.Config, error) {
 
 func LogRequest(r *http.Request, db *pgxpool.Pool) error {
 	sql := `INSERT INTO requests VALUES(default,$1,$2,$3,$4)`
-	fmt.Println(r.Method, " ", r.URL)
 	body, err := ioutil.ReadAll(r.Body)
 	if err != nil {
 		fmt.Println(err)
 		return err
 	}
+	headers := ""
+	for key, val := range r.Header {
+		headers += key + ": " + val[0] + "\n"
+	}
 	queryResult, err := db.Exec(context.Background(), sql,
-		r.Method, r.URL.String(), r.Header.Get("Cookie:"), string(body))
+		r.Method, r.URL.String(), headers, string(body))
 	affected := queryResult.RowsAffected()
 	if (affected != 1) || (err != nil) {
 		fmt.Print(err)
