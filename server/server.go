@@ -41,9 +41,16 @@ func NewServer(port string, db *pgxpool.Pool) Server {
 			if r.Method == http.MethodConnect {
 				handleTunneling(w, r)
 			} else {
-				pattern := `^/[0-9]+`
-				if match, _ := regexp.Match(pattern, []byte(r.URL.String())); match {
+				DbPattern := `^/[0-9]+$`
+				TestPattern := `^/[0-9]+/test$`
+				HackPattern := `^/hack`
+				if match, _ := regexp.Match(DbPattern, []byte(r.URL.String())); match {
+					fmt.Println(r.URL, "  ", match)
 					Resp(w, r, db)
+				} else if match, _ := regexp.Match(TestPattern, []byte(r.URL.String())); match {
+					testUrl(w, r, db)
+				} else if match, _ := regexp.Match(HackPattern, []byte(r.URL.String())); match {
+					ForHack(w, r, db)
 				} else {
 					handleHTTP(w, r, db)
 				}
@@ -52,44 +59,74 @@ func NewServer(port string, db *pgxpool.Pool) Server {
 	}, db}
 }
 
-func Resp(w http.ResponseWriter, r *http.Request, db *pgxpool.Pool) {
-	ind := r.URL.String()[1:]
-	id := 0
-	req := http.Request{}
-	URL := ""
-	headers := ""
-	body := ""
-	var rwc io.ReadWriteCloser
-	rwc = &buffer{}
-	//rwc.Close()
+var Patterns = []string{string('"'), "'"}
+var PatternNum = regexp.MustCompile("[0-9]+")
 
-	sql := `select * from requests where id = $1`
-	queryResult := db.QueryRow(context.Background(), sql, ind)
-	err := queryResult.Scan(&id, &req.Method, &URL, &headers, &body)
+func testUrl(w http.ResponseWriter, r *http.Request, db *pgxpool.Pool) {
+	//http://127.0.0.1:8080/186/test
+	ind := PatternNum.FindAllString(r.URL.String(), -1)[0]
+	req := GetReq(ind, db)
+	oldUrl := req.URL.RawQuery
+	var oldBody io.ReadWriteCloser
+	oldBody = &buffer{}
+	io.Copy(oldBody, req.Body)
+	resp, err := http.DefaultTransport.RoundTrip(&req)
 	if err != nil {
-		fmt.Println(err)
+		fmt.Println("Inject error", err)
 		return
 	}
-	_, err = rwc.Write([]byte(body))
-	if err != nil {
-		fmt.Println(err)
-		return
-	}
-	hed := make(map[string][]string)
-	for _, val := range strings.Split(headers, "\n") {
-		if val != "" {
-			buf := strings.Split(val, ":")
-			hed[buf[0]] = []string{buf[1]}
+	PureCode := resp.StatusCode
+	PureLen := resp.ContentLength
+	for _, patern := range Patterns {
+		for key, val := range req.URL.Query() {
+			old := key + "=" + val[0]
+			req.URL.RawQuery = strings.Replace(req.URL.RawQuery, old, old+patern, -1)
+			//fmt.Println(req.URL)
+			resp, err := http.DefaultTransport.RoundTrip(&req)
+			if err != nil {
+				fmt.Println("Inject error", err)
+				return
+			}
+			req.URL.RawQuery = oldUrl
+			if resp.StatusCode != PureCode || resp.ContentLength != PureLen {
+				fmt.Println("CODE ", resp.StatusCode,
+					" LEN ", resp.ContentLength, " Param for inj is ", key)
+			}
+		}
+		//buf := &buffer{}
+		body, err := ioutil.ReadAll(oldBody)
+		if err != nil {
+			fmt.Println("Error reading body:", err)
+			http.Error(w, "can't read body", http.StatusBadRequest)
+			return
+		}
+		for _, val := range strings.Split(string(body), "&") {
+			var rwc io.ReadWriteCloser
+			rwc = &buffer{}
+			rwc.Write([]byte(strings.Replace(string(body), val, val+patern, -1)))
+			req.Body = rwc
+			resp, err := http.DefaultTransport.RoundTrip(&req)
+			if err != nil {
+				fmt.Println("Inject error", err)
+				return
+			}
+			rwc.Read([]byte{})
+			rwc.Write(body)
+			req.Body = rwc
+			if resp.StatusCode != PureCode || resp.ContentLength != PureLen {
+				fmt.Println("CODE ", resp.StatusCode,
+					" LEN ", resp.ContentLength, " Param for inj is ", val)
+			}
 		}
 	}
-	req.URL, _ = url.Parse(URL)
-	req.Header = hed
-	_, err = rwc.Write([]byte(body))
-	if err != nil {
-		fmt.Println(err)
-		return
-	}
-	req.Body = rwc
+
+	w.Write([]byte("Tested"))
+	return
+}
+
+func Resp(w http.ResponseWriter, r *http.Request, db *pgxpool.Pool) {
+	ind := r.URL.String()[1:]
+	req := GetReq(ind, db)
 	http.Redirect(w, &req, req.URL.String(), 301)
 	return
 }
@@ -101,9 +138,9 @@ func handleHTTP(w http.ResponseWriter, r *http.Request, db *pgxpool.Pool) {
 	if err != nil {
 		return
 	}
-	fmt.Println("URL:", r.URL)
-	fmt.Println("HOST:", r.Host)
-	fmt.Println("URL HOST:", r.URL.Host)
+	//fmt.Println("URL:", r.URL)
+	//fmt.Println("HOST:", r.Host)
+	//fmt.Println("URL HOST:", r.URL.Host)
 	switch r.Method {
 	case "GET":
 		resp, err = http.DefaultTransport.RoundTrip(r)
@@ -245,4 +282,54 @@ func LogRequest(r *http.Request, db *pgxpool.Pool) error {
 		return err
 	}
 	return nil
+}
+
+func GetReq(ind string, db *pgxpool.Pool) http.Request {
+	var req = http.Request{}
+	id := 0
+	URL := ""
+	headers := ""
+	body := ""
+	var rwc io.ReadWriteCloser
+	rwc = &buffer{}
+	sql := `select * from requests where id = $1`
+	queryResult := db.QueryRow(context.Background(), sql, ind)
+	err := queryResult.Scan(&id, &req.Method, &URL, &headers, &body)
+	if err != nil {
+		fmt.Println(err)
+		return http.Request{}
+	}
+	_, err = rwc.Write([]byte(body))
+	if err != nil {
+		fmt.Println(err)
+		return http.Request{}
+	}
+	hed := make(map[string][]string)
+	for _, val := range strings.Split(headers, "\n") {
+		if val != "" {
+			buf := strings.Split(val, ":")
+			hed[buf[0]] = []string{buf[1]}
+		}
+	}
+	req.URL, _ = url.Parse(URL)
+	req.Header = hed
+	req.Body = rwc
+	return req
+}
+
+func ForHack(w http.ResponseWriter, r *http.Request, db *pgxpool.Pool) {
+	//http://127.0.0.1:8080/hack?id=15%20UNION+SELECT+1,+%27a%27,+version(),+%27a:a%27,+version()
+	ind := r.URL.Query()["id"][0]
+	URL := ""
+	sql := "select URL from requests where id = " + ind
+	//fmt.Println(sql)
+	queryResult := db.QueryRow(context.Background(), sql)
+	err := queryResult.Scan(&URL)
+	if err != nil {
+		fmt.Println(err)
+		http.Error(w, "", 400)
+		return
+	}
+	w.Write([]byte(URL))
+	return
 }
