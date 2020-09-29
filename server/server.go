@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"github.com/jackc/pgx/pgxpool"
 	"io"
@@ -90,7 +91,8 @@ func testUrl(w http.ResponseWriter, r *http.Request, db *pgxpool.Pool) {
 			req.URL.RawQuery = oldUrl
 			if resp.StatusCode != PureCode || resp.ContentLength != PureLen {
 				fmt.Println("CODE ", resp.StatusCode,
-					" LEN ", resp.ContentLength, " Param for inj is ", key)
+					" LEN ", resp.ContentLength)
+				fmt.Println("Param for inj is ", key)
 			}
 		}
 		//buf := &buffer{}
@@ -101,8 +103,13 @@ func testUrl(w http.ResponseWriter, r *http.Request, db *pgxpool.Pool) {
 			return
 		}
 		for _, val := range strings.Split(string(body), "&") {
+			if val == "" {
+				break
+			}
+			//fmt.Println("!@$",val,"***")
 			var rwc io.ReadWriteCloser
 			rwc = &buffer{}
+			fmt.Println("body val ", val)
 			rwc.Write([]byte(strings.Replace(string(body), val, val+patern, -1)))
 			req.Body = rwc
 			resp, err := http.DefaultTransport.RoundTrip(&req)
@@ -115,7 +122,8 @@ func testUrl(w http.ResponseWriter, r *http.Request, db *pgxpool.Pool) {
 			req.Body = rwc
 			if resp.StatusCode != PureCode || resp.ContentLength != PureLen {
 				fmt.Println("CODE ", resp.StatusCode,
-					" LEN ", resp.ContentLength, " Param for inj is ", val)
+					" LEN ", resp.ContentLength)
+				fmt.Println("Param for inj is ", val)
 			}
 		}
 	}
@@ -319,16 +327,40 @@ func GetReq(ind string, db *pgxpool.Pool) http.Request {
 
 func ForHack(w http.ResponseWriter, r *http.Request, db *pgxpool.Pool) {
 	//http://127.0.0.1:8080/hack?id=15%20UNION+SELECT+1,+%27a%27,+version(),+%27a:a%27,+version()
-	ind := r.URL.Query()["id"][0]
+	//ind := r.URL.Query()["id"][0]
+
+	body, err := ioutil.ReadAll(r.Body)
+	if err != nil {
+		fmt.Println("Error reading body:", err)
+		http.Error(w, "can't read body", http.StatusBadRequest)
+		return
+	}
+	if string(body) == "" {
+		w.Write([]byte("Bad param"))
+		return
+	}
+	ind := strings.Split(string(body), "&")[0]
+	if ind == "  " {
+		ind = "1"
+	}
+	ind = ind[2:]
+
 	URL := ""
 	sql := "select URL from requests where id = " + ind
 	//fmt.Println(sql)
 	queryResult := db.QueryRow(context.Background(), sql)
-	err := queryResult.Scan(&URL)
+	err = queryResult.Scan(&URL)
+
 	if err != nil {
 		fmt.Println(err)
-		http.Error(w, "", 400)
-		return
+		if err.Error() == "no rows in result set" {
+			w.Write([]byte("Not found"))
+			return
+		} else {
+			fmt.Println(err.Error() == errors.New("no rows in result set").Error())
+			http.Error(w, "", 400)
+			return
+		}
 	}
 	w.Write([]byte(URL))
 	return
